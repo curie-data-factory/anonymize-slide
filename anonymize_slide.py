@@ -254,22 +254,6 @@ class TiffEntry(object):
         return item_fmt
 
     def value(self):
-        # if self.type == BYTE:
-        #     item_fmt = 'b'
-        # elif self.type == ASCII:
-        #     item_fmt = 'c'
-        # elif self.type == SHORT:
-        #     item_fmt = 'H'
-        # elif self.type == LONG:
-        #     item_fmt = 'I'
-        # elif self.type == LONG8:
-        #     item_fmt = 'Q'
-        # elif self.type == FLOAT:
-        #     item_fmt = 'f'
-        # elif self.type == DOUBLE:
-        #     item_fmt = 'd'
-        # else:
-        #     raise ValueError('Unsupported type')
 
         item_fmt = self.format_type()
 
@@ -291,19 +275,21 @@ class TiffEntry(object):
             return items
 
     def overwrite_entry(self, byte_string):
-        """Overwrites self.value with data and destroys the ENTIRE previous entry.
+        """
+        Overwrites self.value with data and destroys the ENTIRE previous entry.
         Extra space will be overwritten.
+        WARNING: Currently only supports BYTE and ASCII types.
+        """
 
-        WARNING: Currently only supports BYTE and ASCII types."""
-        # TYPE = tif.directories[directory].entries[entry].type
-        # fmt = f"{tif.directories[directory].entries[entry].count}{self.format_type()}"
         fmt = '%d%s' % (self.count, self.format_type())
+
         # Hacky fix for strings
         fmt = fmt.replace("c", "s")
 
         # WARNING: Assumes entry contains a string. May fail if this function is extended to non-string types.
         entry_ordinals = self.value()
         old_value = "".join([chr(x) for x in entry_ordinals])
+
         # The extra length that we'll need to overwrite with junk data.
         null_pad = len(old_value) - len(byte_string)
 
@@ -553,13 +539,7 @@ def accept(filename, format):
         print(filename + ':', format)
 
 
-# TODO remove Filename from ImageDescription tags.
-def do_aperio_svs(filename):
-    def cleanse_filename(filename_block):
-        key, val = filename_block.split(" = ")
-        val = "X"
-        anon_block = " = ".join([key, val])
-        return anon_block
+def do_aperio_svs(filename,target=None,reference=None):
 
     # Check file
     with TiffFile(filename) as fh:
@@ -578,16 +558,15 @@ def do_aperio_svs(filename):
         for directory in fh.directories:
             lines = directory.entries[IMAGE_DESCRIPTION].value().splitlines()
             if len(lines) >= 2 and lines[1].startswith(b'label '):
-                # directory.delete(expected_prefix=LZW_CLEARCODE)
                 directory.delete()
                 print("Deleted label.")
                 break
         else:
-            raise IOError("No label detected in SVS file")
+            print("No label detected in SVS file :",filename)
 
     # Strip macro
     with TiffFile(filename) as fh:
-        # Find and delete label
+        # Find and delete macro
         for directory in fh.directories:
             lines = directory.entries[IMAGE_DESCRIPTION].value().splitlines()
             if len(lines) >= 2 and lines[1].startswith(b'macro '):
@@ -595,22 +574,30 @@ def do_aperio_svs(filename):
                 print("Deleted macro.")
                 break
         else:
-            raise IOError("No macro detected in SVS file")
+            print("No macro detected in SVS file :",filename)
 
-    # Remove filename from ImageDescription(s). Why is this even a thing.
-    with TiffFile(filename) as fh:
-        for directory in fh.directories:
-            img_desc = directory.entries[IMAGE_DESCRIPTION].value().decode()
-            if "Filename" in img_desc:
-                print("\n", img_desc)
-                desc_bits = img_desc.split("|")
-                purified_bits = [bit if "Filename" not in bit else cleanse_filename(bit) for bit in desc_bits]
-                clean_desc = "|".join(purified_bits).encode()
-                directory.entries[IMAGE_DESCRIPTION].overwrite_entry(clean_desc)
-                print("Stored filename overwritten")
+    if reference and target:
+        with TiffFile(filename) as fh:
+            target_keys = []
+            for directory in fh.directories:
+                img_desc = directory.entries[IMAGE_DESCRIPTION].value().decode()
+                if target in img_desc:
+                    desc_bits = img_desc.split("|")
+                    purified_bits = []
+                    for bit in desc_bits:
+                        if target not in bit:
+                            purified_bits.append(bit)
+                        else:
+                            key, val = bit.split(" = ")
+                            target_keys.append(key)
+                            anonymize_block = " = ".join([key, reference])
+                            purified_bits.append(anonymize_block)
+                    clean_desc = "|".join(purified_bits).encode()
+                    directory.entries[IMAGE_DESCRIPTION].overwrite_entry(clean_desc)
+            print("Target description overwritten in :", " , ".join(target_keys))
 
 
-def do_hamamatsu_ndpi(filename):
+def do_hamamatsu_ndpi(filename,target=None,reference=None):
     with TiffFile(filename) as fh:
         # Check for NDPI file
         if NDPI_MAGIC not in fh.directories[0].entries:
@@ -621,9 +608,21 @@ def do_hamamatsu_ndpi(filename):
         for directory in fh.directories:
             if directory.entries[NDPI_SOURCELENS].value()[0] == -1:
                 directory.delete(expected_prefix=JPEG_SOI)
+                print("Deleted macro.")
                 break
         else:
-            raise IOError("No label in NDPI file")
+            print("No macro in NDPI file")
+
+        if reference and target:
+            for keys in directory.entries.keys():
+                try:
+                    img_desc = directory.entries[keys].value().decode()
+                    if target in img_desc:
+                        reference_encode = reference.encode()
+                        directory.entries[keys].overwrite_entry(reference_encode)
+                        print("Target description overwritten")
+                except Exception as e:
+                    pass
 
 
 def do_3dhistech_mrxs(filename):
@@ -711,23 +710,11 @@ def _main():
     for filename in filenames:
         print(filename)
         try:
-            # for handler in format_handlers:
-            #     try:
-            #         print(handler)
-            #         handler(filename)
-            #         break
-            #     except UnrecognizedFile:
-            #         pass
-            # else:
-            #     raise IOError('Unrecognized file type')
             anonymize_slide(filename)
         except Exception as e:
             if DEBUG:
                 raise
-            # print >>sys.stderr, '%s: %s' % (filename, str(e))
             print('%s: %s' % (filename, str(e)), file=sys.stderr)
-            # print(f"{filename}: {str(e)}", file=sys.stderr)
-            # print("test", file=sys.stderr)
             exit_code = 1
     sys.exit(exit_code)
 
